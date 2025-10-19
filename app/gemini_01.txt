@@ -1,0 +1,90 @@
+¡Claro! A continuación, se presenta un análisis detallado del funcionamiento del código fuente proporcionado y la evolución de las variables solicitadas.
+
+El proyecto implementa un sistema embebido para un microcontrolador STM32 que sigue una arquitectura de **planificador cooperativo no apropiativo (bare-metal)**, basado en un bucle principal (conocido como "super-loop"). La temporización y la ejecución de tareas se controlan mediante interrupciones del temporizador del sistema (SysTick), configurando un **sistema disparado por eventos (Event-Triggered System)**.
+
+---
+## Análisis del Código Fuente
+
+A continuación se detalla el propósito y funcionamiento de cada archivo relevante.
+
+### `main.c`
+Este es el punto de entrada de la aplicación. Su función principal es inicializar el hardware y luego ceder el control a la lógica de la aplicación.
+* **`main()`**:
+    1.  **Inicialización del Hardware**: Llama a `HAL_Init()` para configurar el microcontrolador, `SystemClock_Config()` para establecer la frecuencia del reloj del sistema, y `MX_GPIO_Init()` y `MX_USART2_UART_Init()` para configurar los pines de entrada/salida y la comunicación serie.
+    2.  **Inicialización de la Aplicación**: Invoca `app_init()` una única vez para preparar la lógica de la aplicación y las tareas.
+    3.  **Bucle Infinito (Super-loop)**: Entra en un bucle `while(1)` donde llama repetidamente a `app_update()`. Esta es la base del planificador: el bucle se ejecuta continuamente, y `app_update()` se encarga de decidir si hay tareas que ejecutar.
+
+### `app.c`
+Este archivo contiene el núcleo del planificador de tareas. Gestiona una lista de tareas y las ejecuta cuando es el momento adecuado, basándose en un contador de "ticks" de sistema.
+* **`app_init()`**:
+    1.  **Configuración Inicial**: Imprime mensajes de bienvenida y estado a través del `LOGGER`.
+    2.  **Inicialización de Tareas**: Recorre una lista de tareas (`task_cfg_list`) y llama a la función de inicialización de cada una (en este caso, solo `task_test_init`).
+    3.  **Inicialización de Contadores**: Pone a cero el contador global de ticks de la aplicación (`g_app_tick_cnt`) y el contador de la tarea de prueba (`g_task_test_tick_cnt`). Lo hace dentro de una **sección crítica** (deshabilitando y habilitando interrupciones con `CPSID i` y `CPSIE i`) para evitar condiciones de carrera.
+
+* **`app_update()`**:
+    1.  **Verificación del Temporizador**: Comprueba si `g_app_tick_cnt` es mayor que cero. Esta variable es incrementada por la interrupción del SysTick.
+    2.  **Ejecución de Tareas**: Si `g_app_tick_cnt` es positivo, entra en un bucle. Dentro de este:
+        * Decrementa `g_app_tick_cnt`.
+        * Resetea el contador de tiempo de ejecución del ciclo actual (`g_app_runtime_us`).
+        * Recorre la lista de tareas y ejecuta la función `update` de cada una (`task_test_update`).
+        * Mide el **tiempo de ejecución** de cada tarea usando un contador de ciclos del procesador.
+        * Actualiza el **Tiempo de Peor Caso de Ejecución (WCET)** para esa tarea si el tiempo medido es el más alto hasta ahora.
+        * Suma el tiempo de ejecución de la tarea al total del ciclo (`g_app_runtime_us`).
+    3.  El bucle continúa hasta que `g_app_tick_cnt` llega a cero, lo que significa que ha "puesto al día" el trabajo pendiente.
+
+* **`HAL_SYSTICK_Callback()`**:
+    1.  **Función de Interrupción**: Esta función es llamada automáticamente por el sistema cada vez que ocurre una interrupción del SysTick (configurado por defecto en el entorno HAL para ser cada **1 milisegundo**).
+    2.  **Incremento de Contadores**: Incrementa los contadores globales `g_app_tick_cnt` y `g_task_test_tick_cnt`. Actúa como el "corazón" o "pulso" del sistema, señalando que ha transcurrido 1 ms.
+
+### `task_test.c`
+Representa una tarea específica de la aplicación. En este caso, su objetivo es mostrar un contador que se actualiza en una pantalla LCD.
+* **`task_test_init()`**:
+    1.  **Inicialización de la Tarea**: Configura sus variables internas e inicializa la pantalla LCD (`displayInit`).
+    2.  **Mensaje Inicial**: Escribe un mensaje de bienvenida estático en la pantalla.
+* **`task_test_update()`**:
+    1.  **Lógica Disparada por Tiempo**: De manera similar a `app_update`, esta función se activa según su propio contador, `g_task_test_tick_cnt`.
+    2.  **Ejecución del Statechart**: Llama a `task_test_statechart()` cada vez que se ejecuta, es decir, cada 1 ms.
+* **`task_test_statechart()`**:
+    1.  **Lógica Principal**: Contiene la lógica real de la tarea. Decrementa un contador interno (`tick`) que se inicializa en 1000.
+    2.  **Actualización del Display**: Cuando el contador `tick` llega a cero, lo reinicia a 1000 y actualiza un número en la pantalla LCD. Como la función se llama cada 1 ms, la pantalla se actualizará aproximadamente **cada 1000 ms (1 segundo)**.
+
+### `display.c`
+Este archivo es el *driver* o controlador para una pantalla de caracteres LCD. Abstrae el manejo de bajo nivel de los pines GPIO para enviar comandos y datos a la pantalla.
+* **`displayInit()`**: Envía la secuencia de comandos necesaria para configurar la pantalla LCD en modo de 4 bits.
+* **`displayCharPositionWrite()`**: Establece la posición del cursor (fila y columna) donde se escribirá el siguiente carácter.
+* **`displayStringWrite()`**: Envía una cadena de caracteres a la pantalla.
+* **Funciones Internas**: Las funciones `displayCodeWrite`, `displayPinWrite` y `displayDataBusWrite` se encargan de manipular los pines GPIO para comunicarse con el hardware de la pantalla. Es importante notar que utilizan retardos bloqueantes (`delay(1)`), lo que significa que detienen la ejecución del procesador durante cortos períodos.
+
+### Archivos no proporcionados
+* **`stm32f1xx_it.c`**: Este archivo normalmente contiene las **rutinas de servicio de interrupción (ISR)**. En este proyecto, la ISR `SysTick_Handler` es fundamental, ya que es la que llama a `HAL_SYSTICK_Callback()` en `app.c`.
+* **`task_test_attribute.h`**: Se infiere que este archivo de cabecera define la estructura de datos `task_test_dta_t`, que almacena el estado o la configuración de la tarea de prueba, como la variable `tick`.
+
+---
+## Evolución de Variables Clave
+
+A continuación se describe cómo cambian las variables clave durante la ejecución del programa.
+
+### `g_task_test_tick_cnt` (unidad: ticks)
+Esta variable actúa como un semáforo o bandera para la tarea `task_test`. Cada "tick" representa **1 milisegundo**.
+
+1.  **Inicio**: En `app_init()`, se inicializa a `0`.
+2.  **Interrupción (Cada 1 ms)**: La función `HAL_SYSTICK_Callback()` es llamada por una interrupción del sistema y ejecuta `g_task_test_tick_cnt++`. Su valor aumenta en 1 cada milisegundo.
+3.  **Ejecución de la Tarea**: Dentro de `task_test_update()`, un bucle se ejecuta mientras `g_task_test_tick_cnt > 0`. En cada iteración de este bucle, la variable se decrementa (`g_task_test_tick_cnt--`).
+4.  **Comportamiento**: En un escenario normal, `task_test_update()` se ejecuta una vez por cada tick del sistema. La variable subirá a 1 (desde la ISR) y `task_test_update()` la bajará a 0 inmediatamente. Si el procesador estuviera ocupado y se perdieran varias interrupciones, el valor podría acumularse (ej. llegar a 5), y el bucle en `task_test_update()` se aseguraría de ejecutar la lógica de la tarea 5 veces para "ponerse al día".
+
+### `g_app_runtime_us` (unidad: microsegundos)
+Esta variable mide el tiempo total de procesamiento de todas las tareas dentro de un único ciclo o "tick" del planificador.
+
+1.  **Inicio del Ciclo**: Justo antes de empezar a ejecutar las tareas en `app_update()` (dentro del `while`), la variable se reinicia a `0`.
+2.  **Durante el Ciclo**: Después de que `task_test_update()` termina, se mide su tiempo de ejecución. Este valor (en microsegundos) se suma a `g_app_runtime_us`. Si hubiera más tareas, el tiempo de cada una también se sumaría.
+3.  **Fin del Ciclo**: Al final del bucle de tareas, la variable contiene la **carga computacional total** de ese tick. Por ejemplo, si `task_test_update` tardó 150 µs en ejecutarse, `g_app_runtime_us` valdrá 150 al final de ese ciclo.
+4.  **Siguiente Ciclo**: Cuando `app_update()` procese el siguiente tick (el próximo milisegundo), la variable volverá a ser `0` antes de medir los nuevos tiempos.
+
+### `task_dta_list[index].WCET` (unidad: microsegundos)
+Esta variable almacena el **Tiempo de Peor Caso de Ejecución** (Worst-Case Execution Time) para la tarea `task_test`. Su propósito es registrar el tiempo más largo que la tarea ha tardado en completarse.
+
+1.  **Inicio**: En `app_init()`, se inicializa a `0`.
+2.  **Cada Ciclo**: En `app_update()`, después de que `task_test_update()` se ejecuta, se mide su tiempo de ejecución (`cycle_counter_time_us`).
+3.  **Comparación y Actualización**: El código compara este nuevo tiempo medido con el valor actual de `WCET`.
+    * `if (task_dta_list[index].WCET < cycle_counter_time_us)`
+4.  **Evolución**: Si el tiempo de ejecución actual es mayor que el `WCET` almacenado, el `WCET` se actualiza con este nuevo valor máximo. Por lo tanto, esta variable **solo puede aumentar o mantener su valor**, nunca disminuir. Refleja el pico de tiempo de procesamiento observado para la tarea desde que se inició el sistema, lo cual es una métrica crucial para analizar la viabilidad de sistemas de tiempo real.

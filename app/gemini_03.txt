@@ -1,0 +1,54 @@
+¡Claro que sí! A continuación, te presento un análisis detallado del funcionamiento de cada uno de los archivos de código fuente que has proporcionado.
+
+---
+
+###  बोर्ड **`board.h` (Capa de Abstracción de Hardware)**
+
+Este archivo es una **capa de abstracción de hardware** (Hardware Abstraction Layer - HAL). Su propósito principal es hacer que el código de la aplicación sea **independiente de la placa específica** que se esté utilizando. En lugar de que el código principal use directamente los nombres de los pines (como `B1_Pin` o `LD2_Pin`), utiliza nombres genéricos definidos en este archivo (como `BTN_A_PIN` o `LED_A_PIN`).
+
+#### **Funcionamiento Clave:**
+
+1.  **Selección de la Placa**: La línea `#define BOARD (NUCLEO_F103RC)` es la más importante. Al cambiar el valor de `BOARD`, se activan diferentes bloques de definiciones gracias a las directivas del preprocesador (`#if`, `#elif`, `#endif`). Esto permite que el mismo código fuente se compile para diferentes microcontroladores (NUCLEO-F103RC, NUCLEO-F401RE, etc.) sin necesidad de modificar el código de la aplicación.
+2.  **Definición de Alias**: Dentro de cada bloque `#if`, se definen macros que actúan como "alias" o apodos para los recursos de hardware:
+    * `BTN_A_PIN` y `BTN_A_PORT`: Definen el pin y el puerto GPIO para un botón genérico 'A'.
+    * `LED_A_PIN` y `LED_A_PORT`: Hacen lo mismo para un LED genérico 'A'.
+    * `BTN_A_PRESSED` y `LED_A_ON`: Definen el estado lógico que representa "presionado" para un botón o "encendido" para un LED. Esto es crucial porque en algunas placas un botón presionado puede significar un nivel bajo (`GPIO_PIN_RESET`) y en otras un nivel alto (`GPIO_PIN_SET`), dependiendo de si usan una configuración pull-up o pull-down.
+
+En resumen, `board.h` actúa como un **traductor**, permitiendo que el programador escriba código más legible y portable que se enfoca en la lógica ("encender el LED A") en lugar de los detalles del hardware ("poner en alto el pin PA5").
+
+---
+
+### ⏱️ **`dwt.h` (Medición de Tiempo de Precisión)**
+
+Este archivo proporciona un conjunto de herramientas para **medir con alta precisión el tiempo de ejecución del código**. No utiliza temporizadores comunes, sino que accede directamente a un periférico del núcleo del procesador ARM Cortex-M llamado **DWT (Data Watchpoint and Trace)**.
+
+#### **Funcionamiento Clave:**
+
+1.  **Contador de Ciclos de CPU**: El periférico DWT incluye un contador de 32 bits (`CYCCNT`) que se incrementa con **cada ciclo de reloj del procesador**. Esto ofrece la máxima resolución posible para medir el tiempo.
+2.  **Funciones `inline`**: Todas las funciones están declaradas como `static inline` y con `__attribute__((always_inline))`. Esto es una optimización importante: le dice al compilador que inserte el código de la función directamente en el lugar donde es llamada, en lugar de generar una llamada a función. Esto elimina la sobrecarga (overhead) de la llamada, asegurando que la medición sea lo más precisa posible.
+3.  **Funciones Principales**:
+    * `cycle_counter_init()`: Habilita el periférico DWT y pone en marcha el contador de ciclos. Es necesario llamarla una vez al inicio de la aplicación.
+    * `cycle_counter_reset()`: Reinicia el contador de ciclos a cero. Se usa justo antes de la sección de código que se quiere medir.
+    * `cycle_counter_get()`: Devuelve el número de ciclos de reloj transcurridos desde el último reinicio.
+    * `cycle_counter_get_time_us()`: Convierte el conteo de ciclos a **microsegundos**. Lo hace dividiendo el número de ciclos por la cantidad de ciclos que ocurren en un microsegundo (`SystemCoreClock / 1000000`). Esta es la función más útil para obtener un tiempo legible por humanos.
+
+Este archivo es fundamental para el análisis de sistemas de tiempo real, ya que permite medir con exactitud el **WCET (Worst-Case Execution Time)** de las tareas, como se hace en el archivo `app.c`.
+
+---
+
+### ⏸️ **`systick.c` (Retardo Bloqueante)**
+
+Este archivo implementa una función de **retardo bloqueante** (`systick_delay_us`) utilizando el temporizador del sistema (SysTick). Un retardo "bloqueante" significa que el procesador se queda "atrapado" en un bucle esperando a que pase el tiempo, sin poder realizar otras tareas.
+
+#### **Funcionamiento Clave:**
+
+1.  **Uso del Contador SysTick**: A diferencia del uso del SysTick en `app.c` (donde se usa para generar interrupciones periódicas), aquí se lee directamente el registro de valor actual del temporizador (`SysTick->VAL`). Este es un contador de 24 bits que cuenta hacia abajo desde un valor de recarga hasta cero.
+2.  **Lógica del Retardo**:
+    * La función `systick_delay_us` primero calcula cuántos "ticks" del reloj del sistema corresponden al retardo en microsegundos solicitado (`target = delay_us * (SystemCoreClock / 1000000UL)`).
+    * Entra en un bucle infinito (`while (1)`) donde continuamente:
+        * Lee el valor actual del contador (`current = SysTick->VAL`).
+        * Calcula cuántos ticks han pasado desde el inicio (`elapsed`).
+        * Maneja correctamente el **desbordamiento** (wrap-around) del contador. Si el contador pasa de 0 al valor de recarga mientras se espera, el cálculo lo tiene en cuenta (`elapsed = SysTick->LOAD + start - current`).
+    * El bucle se rompe (`break`) solo cuando el tiempo transcurrido (`elapsed`) es igual o mayor que el tiempo objetivo (`target`).
+
+Es muy importante entender la diferencia: mientras `dwt.h` *mide* el tiempo que algo tarda en ejecutarse, `systick.c` *crea* una pausa que detiene la ejecución del programa durante un tiempo específico. Este tipo de retardo es útil para tareas simples de temporización (como las requeridas por el driver del LCD en `display.c`), pero debe evitarse en las tareas principales de un sistema de tiempo real, ya que detiene por completo el planificador.

@@ -1,0 +1,59 @@
+¡Hola! Con gusto analizaré el código fuente que adjuntaste y te explicaré su funcionamiento, así como el impacto del uso de `LOGGER_INFO()` en las variables que mencionas.
+
+---
+### **Análisis del Funcionamiento del Código Fuente**
+
+El sistema que presentas es un **planificador cooperativo no apropiativo** (conocido como "bare-metal"), donde las tareas se ejecutan en un bucle infinito (`while(1)` en `main.c`). La temporización se gestiona mediante la interrupción del temporizador del sistema (SysTick), que se dispara a intervalos regulares (generalmente cada 1 milisegundo).
+
+#### 📜 **`app.c` (Núcleo de la Aplicación)**
+Este archivo actúa como el "cerebro" del planificador de tareas.
+
+* **`app_init()`**: Esta función se ejecuta una sola vez al inicio. Su responsabilidad es inicializar todas las tareas configuradas en `task_cfg_list`, poner a cero los contadores globales y configurar el hardware necesario, como el contador de ciclos para medir el tiempo de ejecución.
+* **`app_update()`**: Se llama continuamente desde el bucle principal en `main.c`. Su lógica es la siguiente:
+    1.  Verifica si la variable global `g_app_tick_cnt` es mayor que cero. Esta variable es incrementada por la interrupción del SysTick.
+    2.  Si es así, significa que ha pasado tiempo y hay trabajo por hacer. Entra en un bucle que se ejecuta tantas veces como "ticks" haya pendientes.
+    3.  Dentro del bucle, recorre la lista de tareas (`task_cfg_list`) y llama a la función `update` de cada una (en este caso, `task_test_update`).
+    4.  Mide el **tiempo de ejecución** de cada tarea usando un contador de ciclos del procesador. Este tiempo se suma a `g_app_runtime_us` y se usa para actualizar el **Peor Tiempo de Ejecución (WCET)**.
+* **`HAL_SYSTICK_Callback()`**: Es la rutina de servicio de interrupción del SysTick. Se ejecuta cada milisegundo e incrementa los contadores `g_app_tick_cnt` y `g_task_test_tick_cnt`. Es el "pulso" que marca el ritmo del sistema.
+
+#### 🧪 **`task_test.c` (Tarea de Ejemplo)**
+Este archivo define una tarea específica que se encarga de actualizar un contador en una pantalla LCD.
+
+* **`task_test_init()`**: Se llama desde `app_init()`. Inicializa la pantalla LCD y escribe mensajes estáticos de bienvenida. También inicializa su propio contador de tiempo (`tick`) en 1000.
+* **`task_test_update()`**: Es el corazón de la tarea. Comprueba la variable `g_task_test_tick_cnt` para ver si debe ejecutarse. Llama a `task_test_statechart()` para ejecutar la lógica principal de la tarea. El uso de `__asm("CPSID i")` y `__asm("CPSIE i")` crea una **sección crítica** para leer y modificar `g_task_test_tick_cnt` de forma segura, evitando que una interrupción ocurra a mitad de la operación.
+* **`task_test_statechart()`**: Contiene la lógica de la máquina de estados de la tarea. Decrementa su contador local `tick` cada vez que se ejecuta (cada milisegundo). Cuando `tick` llega a cero, lo reinicia a 1000 y actualiza el número en la pantalla LCD. Esto hace que la pantalla se actualice aproximadamente **cada segundo** (`1000 ms`).
+
+#### 🪵 **`logger.c` y `logger.h` (Sistema de Trazas)**
+Estos archivos implementan un sistema de logging para enviar mensajes de depuración, usualmente a una consola en la PC a través de una técnica llamada **semihosting**.
+
+* **`logger.h`**: Define las macros `LOGGER_LOG` y `LOGGER_INFO`. La macro `GET_NAME` es un truco del preprocesador para convertir el nombre de una variable en una cadena de texto.
+* **`LOGGER_INFO(...)`**: Esta es la macro que utilizas. Se expande para:
+    1.  Llamar a `LOGGER_LOG` para imprimir la cabecera `"[info] "`.
+    2.  Llamar a `LOGGER_LOG` con los argumentos que le pasaste.
+    3.  Llamar a `LOGGER_LOG` para imprimir un salto de línea `"\n"`.
+* **`LOGGER_LOG(...)`**: Es el núcleo del logger. Lo más importante aquí es que **deshabilita las interrupciones globales (`CPSID i`)** antes de preparar el mensaje y las vuelve a habilitar (`CPSIE i`) después de enviarlo a imprimir.
+* **`logger.c`**: Contiene la implementación de la función `logger_log_print_`, que usa `printf` para enviar el mensaje a través de semihosting. Esta operación es **bloqueante y computacionalmente costosa**.
+
+---
+### **Impacto de `LOGGER_INFO()` en las Variables**
+
+El uso de `LOGGER_INFO()` tiene un impacto directo y significativo en el rendimiento y la temporización del sistema, lo cual se refleja en las variables que consultas.
+
+#### ⏱️ **`g_app_runtime_us` (unidad: microsegundos)**
+Esta variable mide el tiempo total de ejecución de todas las tareas en un único tick del sistema.
+
+* **Impacto**: **Aumentará significativamente**. La función `LOGGER_INFO` realiza varias operaciones: formatea una cadena de texto (`snprintf`) y la envía por semihosting (`printf`), lo cual consume una cantidad considerable de ciclos de CPU. Como esta llamada se hace *dentro* del código de la tarea, todo ese tiempo se suma a `g_app_runtime_us`. Por ejemplo, una tarea que normalmente tarda 50 µs podría tardar varios milisegundos (miles de µs) solo por imprimir un mensaje.
+
+#### 📈 **`task_dta_list[index].WCET` (unidad: microsegundos)**
+Esta variable almacena el Peor Tiempo de Ejecución observado para una tarea.
+
+* **Impacto**: **Aumentará para reflejar el tiempo de logging**. Dado que `WCET` guarda el tiempo máximo que ha tardado una tarea en ejecutarse, y el logging es una operación muy lenta, es casi seguro que el `WCET` de cualquier tarea que llame a `LOGGER_INFO` será el tiempo de ejecución de la lógica de la tarea **más** el tiempo que tardó la operación de logging. Su valor será mucho mayor que si no se usara el logger.
+
+#### ⏳ **`g_task_test_tick_cnt` (unidad: ticks o milisegundos)**
+Esta variable es un contador que indica cuántos ticks del sistema (milisegundos) están "pendientes" de ser procesados por la tarea `task_test`.
+
+* **Impacto**: El uso de `LOGGER_INFO` tiene un impacto **crítico y potencialmente problemático** aquí por dos razones:
+    1.  **Bloqueo del Sistema**: La macro `LOGGER_LOG` deshabilita las interrupciones (`CPSID i`) durante toda la operación de logging. Si el logging tarda más de 1 milisegundo (lo cual es muy probable con semihosting), el sistema **perderá una o más interrupciones del SysTick**. Esto significa que `g_task_test_tick_cnt` (y `g_app_tick_cnt`) no se incrementarán, rompiendo por completo la base de tiempo del planificador. El sistema se volverá errático y no cumplirá con sus requerimientos de tiempo real.
+    2.  **Acumulación de Ticks**: En un caso menos severo, si el logging es rápido pero consume una parte importante del milisegundo, la tarea tardará más en procesar su tick. Si el sistema está muy cargado, es posible que para cuando `task_test_update` termine de procesar un tick, ya haya llegado otro. Esto podría causar que `g_task_test_tick_cnt` acumule valores mayores a 1, indicando que la tarea se está "retrasando".
+
+En resumen, el `LOGGER_INFO()` es una herramienta de depuración útil, pero su alto costo computacional y el hecho de que deshabilita interrupciones lo hacen **inadecuado para ser usado en el código de producción de un sistema de tiempo real**, ya que afecta drásticamente las métricas de rendimiento y puede desestabilizar por completo la temporización del planificador.
