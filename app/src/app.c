@@ -90,6 +90,7 @@ task_dta_t task_dta_list[TASK_QTY];
 /********************** external functions definition ************************/
 void app_init(void)
 {
+
 	uint32_t index;
 
 	/* Print out: Application Initialized */
@@ -127,6 +128,7 @@ void app_init(void)
 
 void app_update(void)
 {
+
 	uint32_t index;
 	bool b_time_update_required = false;
 	uint32_t cycle_counter_time_us;
